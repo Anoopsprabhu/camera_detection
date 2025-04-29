@@ -31,6 +31,10 @@ class ImprovedFaceDetector:
             try:
                 with open(JSON_FILE, 'r') as f:
                     self.authorized_image_paths = json.load(f)
+                # Validate paths
+                self.authorized_image_paths = [path for path in self.authorized_image_paths if os.path.exists(path)]
+                with open(JSON_FILE, 'w') as f:
+                    json.dump(self.authorized_image_paths, f)
             except json.JSONDecodeError:
                 with open(JSON_FILE, 'w') as f:
                     json.dump([], f)
@@ -56,6 +60,9 @@ class ImprovedFaceDetector:
         self.authorized_faces = []
         
         for idx, image_path in enumerate(self.authorized_image_paths):
+            if not os.path.exists(image_path):
+                st.sidebar.warning(f"Image file not found: {image_path}")
+                continue
             try:
                 person_image = Image.open(image_path).convert('RGB')
                 faces = self.mtcnn(person_image)
@@ -200,10 +207,18 @@ def save_uploaded_file(uploaded_file):
     filename = f"{timestamp}_{uploaded_file.name}"
     file_path = os.path.join(AUTHORIZED_DIR, filename)
     
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getvalue())
-    
-    return file_path
+    try:
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getvalue())
+        
+        if not os.path.exists(file_path):
+            st.error(f"Failed to save file: {file_path}")
+            return None
+        st.success(f"Saved file: {file_path}")
+        return file_path
+    except Exception as e:
+        st.error(f"Error saving file {filename}: {str(e)}")
+        return None
 
 def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
@@ -215,6 +230,8 @@ def main():
         st.session_state.detection_threshold = 0.75
     
     st.title("Authorized Person Detection System")
+    st.write(f"Current working directory: {os.getcwd()}")  # Debug
+    st.write(f"Authorized directory: {os.path.abspath(AUTHORIZED_DIR)}")  # Debug
     
     col1, col2 = st.columns([2, 1])
     
@@ -234,7 +251,8 @@ def main():
             st.session_state.detector.authorized_image_paths = []
             for uploaded_file in uploaded_files:
                 file_path = save_uploaded_file(uploaded_file)
-                st.session_state.detector.authorized_image_paths.append(file_path)
+                if file_path:
+                    st.session_state.detector.authorized_image_paths.append(file_path)
             
             with open(JSON_FILE, 'w') as f:
                 json.dump(st.session_state.detector.authorized_image_paths, f)
@@ -248,9 +266,17 @@ def main():
             st.subheader("Authorized Persons")
             cols = st.columns(min(3, len(st.session_state.detector.authorized_image_paths)))
             for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
-                with cols[idx % 3]:
-                    img = Image.open(img_path)
-                    st.image(img, caption=f"Person {idx + 1}", width=100)
+                st.write(f"Attempting to open: {img_path}")  # Debug
+                if not os.path.exists(img_path):
+                    st.warning(f"Image file not found: {img_path}")
+                    continue
+                try:
+                    with cols[idx % 3]:
+                        img = Image.open(img_path)
+                        st.image(img, caption=f"Person {idx + 1}", width=100)
+                except Exception as e:
+                    st.error(f"Failed to load image {img_path}: {str(e)}")
+                    continue
 
     with col1:
         st.header("Live Camera Feed")
