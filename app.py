@@ -124,9 +124,10 @@ class FaceDetector:
         return frame, detected
 
 class VideoProcessor(VideoProcessorBase):
-    def __init__(self, detector, threshold):
-        self.detector = detector
-        self.threshold = threshold
+    def __init__(self):
+        # Get detector from session state
+        self.detector = st.session_state.detector
+        self.threshold = st.session_state.detection_threshold
         self.last_log_time = 0
     
     def recv(self, frame):
@@ -170,6 +171,9 @@ def main():
     
     if 'webcam_active' not in st.session_state:
         st.session_state.webcam_active = False
+        
+    if 'detection_threshold' not in st.session_state:
+        st.session_state.detection_threshold = 0.75
     
     st.title("Authorized Person Detection")
     
@@ -206,11 +210,11 @@ def main():
         st.header("Camera Feed")
         
         # Threshold control
-        threshold = st.slider(
+        st.session_state.detection_threshold = st.slider(
             "Recognition Threshold",
             min_value=0.5,
             max_value=0.95,
-            value=0.75,
+            value=st.session_state.detection_threshold,
             step=0.05
         )
         
@@ -223,10 +227,7 @@ def main():
         if st.session_state.webcam_active:
             webrtc_ctx = webrtc_streamer(
                 key="face-detection",
-                video_processor_factory=lambda: VideoProcessor(
-                    st.session_state.detector,
-                    threshold
-                ),
+                video_processor_factory=VideoProcessor,
                 rtc_configuration=RTC_CONFIGURATION,
                 media_stream_constraints={
                     "video": {
