@@ -266,7 +266,7 @@ def save_uploaded_file(uploaded_file):
     else:
         image_paths = []
     
-    # Use OS-specific normalized path
+    #-REDACTED- Use OS-specific normalized path
     file_path = os.path.normpath(file_path)
     image_paths.append(file_path)
     
@@ -394,14 +394,13 @@ def main():
         </script>
         """
         
-        snapshot_placeholder.components.html(snapshot_html, height=300)
+        # Render the HTML/JavaScript component
+        from streamlit.components.v1 import html
+        html(snapshot_html, height=300)
         
         # JavaScript callback handler
-        from streamlit.components.v1 import components
-        
-        # Create a custom component to receive messages from JavaScript
         def webcam_snapshot_receiver():
-            html = """
+            html_code = """
             <script>
             window.addEventListener('message', function(event) {
                 if (event.data.type === 'streamlit:webcamSnapshot') {
@@ -413,7 +412,7 @@ def main():
             });
             </script>
             """
-            return components.html(html, height=0)
+            return html(html_code, height=0)
         
         snapshot_value = webcam_snapshot_receiver()
         
