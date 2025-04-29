@@ -13,37 +13,55 @@ import torch
 AUTHORIZED_DIR = "authorized_images"
 JSON_FILE = "authorized_images.json"
 
+# Server configuration for camera
+DEFAULT_CAMERA_SOURCE = 0  # Default webcam
+SERVER_RTSP_URL = None     # Can be set to a specific RTSP stream if needed
+
 class ImprovedPersonDetector:
     def __init__(self):
         """Initialize the detector with authorized images"""
         self.authorized_faces = []
         self.authorized_image_paths = []
         
+        # Ensure directory exists with proper permissions
         if not os.path.exists(AUTHORIZED_DIR):
-            os.makedirs(AUTHORIZED_DIR)
+            os.makedirs(AUTHORIZED_DIR, exist_ok=True)
         
+        # Load existing image paths
         if os.path.exists(JSON_FILE):
-            with open(JSON_FILE, 'r') as f:
-                self.authorized_image_paths = json.load(f)
-                # Filter out non-existent files
-                self.authorized_image_paths = [path for path in self.authorized_image_paths if os.path.exists(path)]
-                # Save filtered paths back to JSON
-                with open(JSON_FILE, 'w') as f_write:
-                    json.dump(self.authorized_image_paths, f_write)
+            try:
+                with open(JSON_FILE, 'r') as f:
+                    self.authorized_image_paths = json.load(f)
+                    # Normalize all paths to use proper OS-specific separators
+                    self.authorized_image_paths = [os.path.normpath(p) for p in self.authorized_image_paths]
+            except json.JSONDecodeError:
+                st.sidebar.error("❌ Error reading JSON file. Creating a new one.")
+                with open(JSON_FILE, 'w') as f:
+                    json.dump([], f)
+                self.authorized_image_paths = []
         
-        self.mtcnn = MTCNN(keep_all=True, device='cpu', margin=20, min_face_size=80)
-        self.resnet = InceptionResnetV1(pretrained='vggface2').eval()
+        # Initialize face detection and recognition models
+        try:
+            self.mtcnn = MTCNN(keep_all=True, device='cpu', margin=20, min_face_size=80)
+            self.resnet = InceptionResnetV1(pretrained='vggface2').eval()
+        except Exception as e:
+            st.error(f"❌ Error initializing face detection models: {str(e)}")
         
     def load_images(self):
         """Load authorized images"""
         self.authorized_faces = []
+        valid_paths = []
         
         for idx, image_path in enumerate(self.authorized_image_paths):
+            # Normalize path for the current OS
+            image_path = os.path.normpath(image_path)
+            
+            # Check if file exists
+            if not os.path.exists(image_path):
+                st.sidebar.warning(f"❌ Image not found: {image_path}")
+                continue
+                
             try:
-                if not os.path.exists(image_path):
-                    st.sidebar.error(f"❌ File not found: {os.path.basename(image_path)}")
-                    continue
-                    
                 person_image = Image.open(image_path).convert('RGB')
                 faces = self.mtcnn(person_image)
                 
@@ -59,31 +77,43 @@ class ImprovedPersonDetector:
                     })
                     
                     st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
+                    valid_paths.append(image_path)
                 else:
-                    st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
+                    st.sidebar.warning(f"⚠️ No face found in authorized image {idx + 1}")
             except Exception as e:
-                st.sidebar.error(f"❌ Error loading image {idx + 1}: {str(e)}")
+                st.sidebar.error(f"❌ Error processing image {image_path}: {str(e)}")
         
+        # Update paths to include only valid ones
+        self.authorized_image_paths = valid_paths
+        # Update JSON with only valid paths
+        with open(JSON_FILE, 'w') as f:
+            json.dump(valid_paths, f)
+            
         st.sidebar.info(f"Loaded {len(self.authorized_faces)} authorized persons")
     
     def remove_images(self):
         """Remove all authorized images and delete all files listed in JSON"""
         if os.path.exists(JSON_FILE):
-            with open(JSON_FILE, 'r') as f:
-                image_paths = json.load(f)
-            
-            for file_path in image_paths:
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        st.sidebar.success(f"🗑️ Deleted file: {os.path.basename(file_path)}")
-                    except Exception as e:
-                        st.sidebar.error(f"❌ Failed to delete {os.path.basename(file_path)}: {str(e)}")
-                else:
-                    st.sidebar.warning(f"File not found: {os.path.basename(file_path)}")
-            
-            with open(JSON_FILE, 'w') as f:
-                json.dump([], f)
+            try:
+                with open(JSON_FILE, 'r') as f:
+                    image_paths = json.load(f)
+                
+                for file_path in image_paths:
+                    # Normalize path for current OS
+                    file_path = os.path.normpath(file_path)
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            st.sidebar.success(f"🗑️ Deleted file: {os.path.basename(file_path)}")
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Failed to delete {os.path.basename(file_path)}: {str(e)}")
+                    else:
+                        st.sidebar.warning(f"File not found: {os.path.basename(file_path)}")
+                
+                with open(JSON_FILE, 'w') as f:
+                    json.dump([], f)
+            except Exception as e:
+                st.sidebar.error(f"❌ Error cleaning up authorized images: {str(e)}")
         
         self.authorized_faces = []
         self.authorized_image_paths = []
@@ -119,215 +149,268 @@ class ImprovedPersonDetector:
     def process_frame(self, frame, threshold=0.75):
         """Process frame to detect authorized persons"""
         try:
-            # Convert frame to RGB for MTCNN
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_frame)
-            
-            # Get faces with MTCNN
-            try:
-                faces = self.mtcnn(pil_image)
-                boxes = self.mtcnn.detect(pil_image)[0] if faces is not None else None
-            except Exception as e:
-                # If MTCNN fails, try with a resized image
-                new_size = (640, 480)
-                pil_image = pil_image.resize(new_size)
-                faces = self.mtcnn(pil_image)
-                boxes = self.mtcnn.detect(pil_image)[0] if faces is not None else None
+            if frame is None:
+                return np.zeros((480, 640, 3), dtype=np.uint8), []
+                
+            pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            faces = self.mtcnn(pil_image)
             
             detected_persons = []
             
-            if faces is not None and boxes is not None:
-                # Process each detected face
-                for i, face_tensor in enumerate(faces):
-                    if i >= len(boxes):
-                        continue
-                    
-                    # Get embedding
-                    try:
+            if faces is not None:
+                boxes = self.mtcnn.detect(pil_image)[0]
+                if boxes is not None:
+                    for i, face_tensor in enumerate(faces):
+                        if i >= len(boxes):
+                            continue
+                        
                         face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().numpy()
                         match, confidence = self.match_face(face_embedding, threshold)
-                    except Exception as e:
-                        # Skip this face if embedding fails
-                        continue
-                    
-                    if match:
-                        # Get coordinates
-                        box = boxes[i]
-                        left, top, right, bottom = map(int, box)
                         
-                        # Ensure coordinates are within image bounds
-                        height, width = frame.shape[:2]
-                        left = max(0, min(left, width-1))
-                        top = max(0, min(top, height-1))
-                        right = max(0, min(right, width-1))
-                        bottom = max(0, min(bottom, height-1))
-                        
-                        person_name = match['name']
-                        detected_persons.append({"name": person_name, "confidence": confidence})
-                        
-                        # Draw bounding box
-                        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                        
-                        # Draw label background
-                        text_height = 25
-                        text_y_pos = min(bottom, height - 5)
-                        text_bottom = min(bottom + text_height, height)
-                        cv2.rectangle(frame, (left, text_y_pos - text_height), (right, text_y_pos), 
-                                     (0, 255, 0), cv2.FILLED)
-                        
-                        # Draw label text
-                        info_text = f"{person_name} ({confidence:.1f}%)"
-                        cv2.putText(frame, info_text, (left + 6, text_y_pos - 6),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
+                        if match:
+                            box = boxes[i]
+                            left, top, right, bottom = map(int, box)
+                            person_name = match['name']
+                            detected_persons.append({"name": person_name, "confidence": confidence})
+                            
+                            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                            info_text = f"{person_name} ({confidence:.1f}%)"
+                            cv2.rectangle(frame, (left, bottom - 25), (right, bottom), (0, 255, 0), cv2.FILLED)
+                            cv2.putText(frame, info_text, (left + 6, bottom - 6),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         except Exception as e:
-            # Add error text to the frame
-            cv2.putText(frame, f"Error: {str(e)}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Don't interrupt the camera feed on error, just log it
+            st.error(f"Error in frame processing: {str(e)}")
+            return np.zeros((480, 640, 3), dtype=np.uint8), []
         
         return frame, detected_persons
 
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to the authorized_images directory and update JSON"""
+    # Ensure the directory exists
+    if not os.path.exists(AUTHORIZED_DIR):
+        os.makedirs(AUTHORIZED_DIR, exist_ok=True)
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_{uploaded_file.name}"
+    # Remove any problematic characters from filename
+    safe_filename = ''.join(c for c in uploaded_file.name if c.isalnum() or c in '._-')
+    filename = f"{timestamp}_{safe_filename}"
     file_path = os.path.join(AUTHORIZED_DIR, filename)
     
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getvalue())
     
     if os.path.exists(JSON_FILE):
-        with open(JSON_FILE, 'r') as f:
-            image_paths = json.load(f)
+        try:
+            with open(JSON_FILE, 'r') as f:
+                image_paths = json.load(f)
+        except json.JSONDecodeError:
+            st.warning("❌ Error reading JSON file. Creating a new one.")
+            image_paths = []
     else:
         image_paths = []
     
+    # Use OS-specific normalized path
+    file_path = os.path.normpath(file_path)
     image_paths.append(file_path)
+    
     with open(JSON_FILE, 'w') as f:
         json.dump(image_paths, f)
     
     return file_path
 
-def run_detection(detector, threshold, webcam_placeholder, log_placeholder, camera_source=0):
+def open_camera_source(source_id):
+    """
+    Try to open the camera with the given source identifier
+    Returns the VideoCapture object or None if failed
+    """
+    # First try to interpret as a number
+    try:
+        if isinstance(source_id, str) and source_id.isdigit():
+            source_id = int(source_id)
+    except ValueError:
+        pass  # Keep as string if not a valid integer
+    
+    # Try to open the camera
+    cap = cv2.VideoCapture(source_id)
+    
+    # Check if opened successfully
+    if cap.isOpened():
+        return cap
+    else:
+        return None
+
+def find_available_camera():
+    """
+    Find an available camera by trying different sources
+    Returns the first working camera or None if none found
+    """
+    # Check common camera indices
+    for source_id in [0, 1, 2, 3, 4]:
+        cap = open_camera_source(source_id)
+        if cap is not None:
+            return cap
+    
+    # Try common device paths on Linux
+    for device in ['/dev/video0', '/dev/video1', '/dev/video2']:
+        if os.path.exists(device):
+            cap = open_camera_source(device)
+            if cap is not None:
+                return cap
+    
+    # If SERVER_RTSP_URL is defined, try that
+    if SERVER_RTSP_URL:
+        cap = open_camera_source(SERVER_RTSP_URL)
+        if cap is not None:
+            return cap
+    
+    # No camera found
+    return None
+
+def run_detection(detector, threshold, webcam_placeholder, log_placeholder, camera_source):
     """Run the detection loop independently"""
-    # Try to open the webcam with specified source
-    cap = cv2.VideoCapture(camera_source)
+    # Try to open the specified camera source
+    cap = open_camera_source(camera_source)
     
-    # If failed, try alternative sources
-    if not cap.isOpened():
-        webcam_placeholder.warning(f"❌ Could not open webcam with source {camera_source}. Trying alternative sources...")
-        
-        # Try common camera indices
-        for src in [0, 1, 2, -1]:
-            if src == camera_source:
-                continue  # Skip the one we already tried
-                
-            webcam_placeholder.info(f"Trying camera source: {src}")
-            cap = cv2.VideoCapture(src)
-            if cap.isOpened():
-                webcam_placeholder.success(f"✅ Successfully connected to camera source: {src}")
-                st.session_state.camera_source = src  # Save working source for future use
-                break
-                
-        # If still not open, try platform-specific options
-        if not cap.isOpened():
-            if os.name == 'posix':  # Linux/Mac
-                for dev_path in ['/dev/video0', '/dev/video1', '/dev/video2']:
-                    webcam_placeholder.info(f"Trying device path: {dev_path}")
-                    cap = cv2.VideoCapture(dev_path)
-                    if cap.isOpened():
-                        webcam_placeholder.success(f"✅ Successfully connected to: {dev_path}")
-                        break
+    # If that fails, try to find any available camera
+    if cap is None or not cap.isOpened():
+        webcam_placeholder.warning("⚠️ Couldn't open specified camera, trying to find an available one...")
+        cap = find_available_camera()
     
-    # Final check if any camera source worked
-    if not cap.isOpened():
-        webcam_placeholder.error("❌ Could not open any webcam. Please check your camera connection and permissions.")
+    # If still no camera, show error
+    if cap is None or not cap.isOpened():
+        webcam_placeholder.error("❌ Could not open any webcam")
         st.session_state.detection_active = False
-        
-        # Provide test mode with a sample image
-        if webcam_placeholder.button("⚠️ Use Test Mode (with sample image)"):
-            # Create a sample frame
-            sample_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(sample_frame, "TEST MODE - NO CAMERA", (50, 240), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            webcam_placeholder.image(sample_frame, channels="BGR", use_column_width=True)
-            webcam_placeholder.warning("⚠️ Test mode active - no actual detection will occur")
-        
         return
     
     try:
-        # Set camera properties for better performance
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        # Check if camera provides frames
-        ret, test_frame = cap.read()
-        if not ret or test_frame is None:
-            webcam_placeholder.error("❌ Camera opened but not providing frames. Please check camera.")
-            st.session_state.detection_active = False
-            cap.release()
-            return
-            
-        webcam_placeholder.success("✅ Camera successfully initialized!")
+        frame_count = 0
+        connection_retry_count = 0
+        blank_frame_count = 0
         
         while st.session_state.detection_active:
             ret, frame = cap.read()
-            if not ret:
-                webcam_placeholder.warning("⚠️ Failed to get frame from camera")
-                time.sleep(1)  # Wait a bit before trying again
+            
+            # Handle connection issues or blank frames
+            if not ret or frame is None or frame.size == 0:
+                blank_frame_count += 1
+                connection_retry_count += 1
+                
+                # After several failed attempts, show a message
+                if blank_frame_count > 10:
+                    webcam_placeholder.warning("⚠️ Camera connection issue. Attempting to reconnect...")
+                    blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(blank_frame, "Camera disconnected...", (150, 240), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    webcam_placeholder.image(blank_frame, channels="BGR", use_column_width=True)
+                
+                # Try to reconnect if we've had several consecutive failures
+                if connection_retry_count > 30:  # About 1.5 seconds
+                    webcam_placeholder.info("🔄 Reconnecting to camera...")
+                    cap.release()
+                    time.sleep(1)
+                    cap = open_camera_source(camera_source)
+                    if cap is None or not cap.isOpened():
+                        cap = find_available_camera()
+                    
+                    connection_retry_count = 0
+                    # If still can't connect, abort
+                    if cap is None or not cap.isOpened():
+                        webcam_placeholder.error("❌ Failed to reconnect to any camera. Stopping detection.")
+                        st.session_state.detection_active = False
+                        break
+                
+                time.sleep(0.05)
                 continue
             
-            frame, detected_persons = detector.process_frame(frame, threshold)
+            # Reset counters on successful frame read
+            blank_frame_count = 0
+            connection_retry_count = 0
             
-            status = "✅ DETECTED" if detected_persons else "Scanning..."
-            status_color = (0, 255, 0) if detected_persons else (255, 255, 255)
-            cv2.putText(frame, status, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+            # Process frames at a reduced rate to lower CPU usage
+            if frame_count % 3 == 0:  # Process every 3rd frame
+                frame, detected_persons = detector.process_frame(frame, threshold)
+                
+                status = "✅ DETECTED" if detected_persons else "Scanning..."
+                status_color = (0, 255, 0) if detected_persons else (255, 255, 255)
+                cv2.putText(frame, status, (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                
+                if detected_persons:
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for person in detected_persons:
+                        st.session_state.detection_log.insert(0, {
+                            "Timestamp": current_time,
+                            "Person": person["name"],
+                            "Confidence": f"{person['confidence']:.1f}%"
+                        })
+                
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                webcam_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
+                
+                if st.session_state.detection_log:
+                    # Limit log to prevent memory issues
+                    if len(st.session_state.detection_log) > 100:
+                        st.session_state.detection_log = st.session_state.detection_log[:100]
+                    log_placeholder.dataframe(st.session_state.detection_log, height=400)
+                else:
+                    log_placeholder.info("No authorized persons detected yet")
             
-            if detected_persons:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                for person in detected_persons:
-                    st.session_state.detection_log.insert(0, {
-                        "Timestamp": current_time,
-                        "Person": person["name"],
-                        "Confidence": f"{person['confidence']:.1f}%"
-                    })
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            webcam_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
-            
-            if st.session_state.detection_log:
-                log_placeholder.dataframe(st.session_state.detection_log, height=400)
-            else:
-                log_placeholder.info("No authorized persons detected yet")
-            
-            time.sleep(0.05)
+            frame_count += 1
+            time.sleep(0.05)  # Short sleep to prevent high CPU usage
     
     except Exception as e:
-        webcam_placeholder.error(f"❌ Error during detection: {str(e)}")
-        st.session_state.detection_active = False
-    
+        st.error(f"Detection error: {str(e)}")
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
     
     st.title("Authorized Person Detection System")
-    st.subheader("Authorized Person")
     
+    # Initialize session state
     if 'detector' not in st.session_state:
         st.session_state.detector = ImprovedPersonDetector()
         st.session_state.detection_active = False
         st.session_state.detection_log = []
-        st.session_state.camera_source = 0  # Default camera source
     
     col1, col2 = st.columns([2, 1])
     webcam_placeholder = col1.empty()
     log_placeholder = col2.empty()
     
+    # Camera configuration in sidebar
     st.sidebar.header("Configuration")
-    st.sidebar.subheader("Upload Authorized Persons (Optional)")
+    
+    # Camera source selection
+    st.sidebar.subheader("Camera Settings")
+    camera_options = {
+        "Default Webcam (0)": 0,
+        "Secondary Camera (1)": 1,
+        "Video Device (/dev/video0)": "/dev/video0"
+    }
+    
+    # Add RTSP option if defined
+    if SERVER_RTSP_URL:
+        camera_options["Server Camera (RTSP)"] = SERVER_RTSP_URL
+    
+    # Add custom option
+    camera_source = st.sidebar.selectbox(
+        "Select Camera Source", 
+        list(camera_options.keys())
+    )
+    
+    # Custom camera URL/index
+    custom_source = st.sidebar.text_input(
+        "Or enter custom camera source (device path, URL, or index)",
+        ""
+    )
+    
+    # Determine the actual camera source to use
+    final_camera_source = custom_source if custom_source else camera_options[camera_source]
+    
+    st.sidebar.subheader("Upload Authorized Persons")
     authorized_uploads = st.sidebar.file_uploader(
         "Upload images of authorized persons", 
         type=["jpg", "jpeg", "png"],
@@ -336,136 +419,76 @@ def main():
     )
     
     if st.sidebar.button("Load Authorized Images"):
-        st.session_state.detector.authorized_image_paths = []
+        # Save and load newly uploaded images
         for uploaded_file in authorized_uploads:
             file_path = save_uploaded_file(uploaded_file)
-            st.session_state.detector.authorized_image_paths.append(file_path)
+            if file_path not in st.session_state.detector.authorized_image_paths:
+                st.session_state.detector.authorized_image_paths.append(file_path)
+        # Load all images (including previously saved ones)
         st.session_state.detector.load_images()
     
     if st.sidebar.button("Remove Authorized Images"):
         st.session_state.detector.remove_images()
     
-    # Add error handling for displaying authorized person images
+    # Display thumbnails of authorized persons if any exist
     if st.session_state.detector.authorized_image_paths:
         st.sidebar.subheader("Authorized Persons")
-        valid_paths = []
+        # Calculate how many columns we need
+        num_images = len(st.session_state.detector.authorized_image_paths)
+        cols_per_row = min(3, num_images)  # Max 3 columns per row
         
-        for path in st.session_state.detector.authorized_image_paths:
-            if os.path.exists(path):
-                valid_paths.append(path)
-        
-        if valid_paths:
-            cols = st.sidebar.columns(min(3, len(valid_paths)))
-            for idx, img_path in enumerate(valid_paths):
-                try:
-                    with cols[idx % 3]:
-                        img = Image.open(img_path)
-                        st.image(img, caption=f"Person {idx + 1}", width=100)
-                except Exception as e:
-                    st.sidebar.error(f"Error displaying image: {os.path.basename(img_path)}")
-        else:
-            st.sidebar.warning("No valid image files found in authorized images list")
+        if cols_per_row > 0:  # Check if we have any images
+            cols = st.sidebar.columns(cols_per_row)
+            for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
+                norm_path = os.path.normpath(img_path)
+                # Only try to display if file exists
+                if os.path.exists(norm_path):
+                    try:
+                        with cols[idx % cols_per_row]:
+                            img = Image.open(norm_path)
+                            st.image(img, caption=f"Person {idx + 1}", width=100)
+                    except Exception as e:
+                        st.sidebar.error(f"Cannot display image {idx+1}: {str(e)}")
     
     with col1:
         st.header("Live Camera Feed")
-        threshold = 0.75
+        threshold = st.slider("Detection Confidence Threshold", 0.6, 0.9, 0.75, 0.05)
         
-        # Camera source selection
-        camera_options = ["Default (0)", "Camera 1", "Camera 2", "Camera 3", "USB Camera", "Integrated Webcam"]
-        camera_values = [0, 1, 2, 3, "USB", "Integrated"]
+        # Test camera button
+        if st.button("Test Camera Connection"):
+            test_cap = open_camera_source(final_camera_source)
+            if test_cap is not None and test_cap.isOpened():
+                ret, frame = test_cap.read()
+                if ret and frame is not None:
+                    st.success(f"✅ Successfully connected to camera source: {final_camera_source}")
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    st.image(rgb_frame, caption="Camera Test Image", use_column_width=True)
+                else:
+                    st.error(f"❌ Camera opened but failed to read frame from: {final_camera_source}")
+                test_cap.release()
+            else:
+                st.error(f"❌ Failed to connect to camera source: {final_camera_source}")
+                # Try fallback options
+                st.info("🔍 Trying to find available cameras...")
+                fallback_cap = find_available_camera()
+                if fallback_cap is not None:
+                    ret, frame = fallback_cap.read()
+                    if ret and frame is not None:
+                        st.success("✅ Found an available camera! Use this instead.")
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        st.image(rgb_frame, caption="Available Camera", use_column_width=True)
+                    fallback_cap.release()
+                else:
+                    st.error("❌ No cameras found on this system.")
         
-        cam_col1, cam_col2 = st.columns([2, 1])
-        with cam_col1:
-            selected_camera = st.selectbox(
-                "Select Camera Source", 
-                options=camera_options,
-                index=0,
-                help="If your webcam isn't working, try a different source"
-            )
-        
-        # Map selection to camera source value
-        camera_idx = camera_options.index(selected_camera)
-        camera_source = camera_values[camera_idx]
-        
-        # Store the selected camera source
-        if isinstance(camera_source, str):
-            if camera_source == "USB":
-                st.session_state.camera_source = 1  # Common for USB cameras
-            elif camera_source == "Integrated":
-                st.session_state.camera_source = 0  # Common for integrated webcams
-        else:
-            st.session_state.camera_source = camera_source
-            
-        with cam_col2:
-            if st.button("Test Camera"):
-                # Quick camera test without starting detection
-                test_placeholder = st.empty()
-                try:
-                    test_cap = cv2.VideoCapture(st.session_state.camera_source)
-                    if test_cap.isOpened():
-                        ret, frame = test_cap.read()
-                        if ret:
-                            test_placeholder.image(
-                                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), 
-                                caption="Camera Test Successful", 
-                                use_column_width=True
-                            )
-                            st.success(f"✅ Camera {st.session_state.camera_source} is working!")
-                        else:
-                            test_placeholder.error("Camera opened but could not read frame")
-                    else:
-                        test_placeholder.error(f"Could not open camera source: {st.session_state.camera_source}")
-                except Exception as e:
-                    test_placeholder.error(f"Camera test error: {str(e)}")
-                finally:
-                    if 'test_cap' in locals() and test_cap is not None:
-                        test_cap.release()
-        
-        # Start/Stop button
+        # Start/Stop detection button
         if st.button("Start/Stop Detection"):
             st.session_state.detection_active = not st.session_state.detection_active
             if st.session_state.detection_active:
+                if len(st.session_state.detector.authorized_faces) == 0:
+                    st.warning("⚠️ No authorized persons loaded. Detection will not recognize anyone.")
                 st.session_state.detection_log = []
-                run_detection(
-                    st.session_state.detector, 
-                    threshold, 
-                    webcam_placeholder, 
-                    log_placeholder,
-                    st.session_state.camera_source
-                )
-        
-        # Alternative Detection Method
-        if st.checkbox("Enable Alternative Detection (no webcam)"):
-            st.info("You can upload an image for detection instead of using webcam")
-            test_image = st.file_uploader("Upload image for detection", type=["jpg", "jpeg", "png"])
-            
-            if test_image is not None:
-                image = Image.open(test_image)
-                image_np = np.array(image)
-                
-                # Convert RGB to BGR (OpenCV format)
-                if len(image_np.shape) == 3 and image_np.shape[2] == 3:
-                    image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-                
-                processed_image, detected_persons = st.session_state.detector.process_frame(image_np, threshold)
-                
-                # Show results
-                st.image(cv2.cvtColor(processed_image, cv2.COLOR_BGR2RGB), caption="Detection Results", use_column_width=True)
-                
-                if detected_persons:
-                    st.success(f"Detected {len(detected_persons)} authorized persons")
-                    for person in detected_persons:
-                        st.info(f"✓ {person['name']} (Confidence: {person['confidence']:.1f}%)")
-                        
-                        # Add to log
-                        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        st.session_state.detection_log.insert(0, {
-                            "Timestamp": current_time,
-                            "Person": person["name"],
-                            "Confidence": f"{person['confidence']:.1f}%"
-                        })
-                else:
-                    st.warning("No authorized persons detected in the image")
+                run_detection(st.session_state.detector, threshold, webcam_placeholder, log_placeholder, final_camera_source)
         
         status = "ACTIVE" if st.session_state.detection_active else "INACTIVE"
         if st.session_state.detection_active:
@@ -474,15 +497,48 @@ def main():
             st.error(f"Detection is {status}")
         
     with col2:
-        # "Detection Log" heading is placed above the content
         st.header("Detection Log")
-        # Table or info message is placed below the heading within a container
         with st.container():
-            
             if st.session_state.detection_log:
                 log_placeholder.dataframe(st.session_state.detection_log, height=400)
             else:
                 log_placeholder.info("No authorized persons detected yet")
+    
+    # Server info section
+    st.markdown("---")
+    
+    # System info expander for debugging
+    with st.expander("System Information"):
+        # Show server environment information if available
+        st.write("**Camera Access Information:**")
+        
+        # Check if we're running on Linux
+        is_linux = os.name == 'posix'
+        st.write(f"- Operating System: {'Linux' if is_linux else 'Windows/Other'}")
+        
+        # On Linux, check available video devices
+        if is_linux:
+            video_devices = [d for d in os.listdir('/dev') if d.startswith('video')]
+            st.write(f"- Available video devices: {', '.join(video_devices) if video_devices else 'None found'}")
+            
+            # Try to get webcam permissions
+            st.write("- To grant webcam permissions on Linux server:")
+            st.code("sudo chmod 777 /dev/video*")
+        
+        # Display currently selected camera source
+        st.write(f"- Current camera source: {final_camera_source}")
+    
+    # Add informational footer
+    st.markdown("---")
+    st.markdown("""
+    ### How to use:
+    1. Select a camera source or enter a custom one (device path, URL, or index)
+    2. Test the camera connection with the "Test Camera Connection" button
+    3. Upload one or more images of authorized persons using the sidebar
+    4. Click "Load Authorized Images" to process the images
+    5. Click "Start/Stop Detection" to begin detection
+    6. Detected authorized persons will appear in the log
+    """)
     
 if __name__ == "__main__":
     main()
