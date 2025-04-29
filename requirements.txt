@@ -5,3 +5,4 @@ Pillow==10.2.0
 torch==2.2.1
 torchvision==0.17.1
 facenet-pytorch==2.5.3
+streamlit-webrtc==0.47.7
