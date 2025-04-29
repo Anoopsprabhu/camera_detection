@@ -25,6 +25,11 @@ class ImprovedPersonDetector:
         if os.path.exists(JSON_FILE):
             with open(JSON_FILE, 'r') as f:
                 self.authorized_image_paths = json.load(f)
+                # Filter out non-existent files
+                self.authorized_image_paths = [path for path in self.authorized_image_paths if os.path.exists(path)]
+                # Save filtered paths back to JSON
+                with open(JSON_FILE, 'w') as f_write:
+                    json.dump(self.authorized_image_paths, f_write)
         
         self.mtcnn = MTCNN(keep_all=True, device='cpu', margin=20, min_face_size=80)
         self.resnet = InceptionResnetV1(pretrained='vggface2').eval()
@@ -34,23 +39,30 @@ class ImprovedPersonDetector:
         self.authorized_faces = []
         
         for idx, image_path in enumerate(self.authorized_image_paths):
-            person_image = Image.open(image_path).convert('RGB')
-            faces = self.mtcnn(person_image)
-            
-            if faces is not None and len(faces) > 0:
-                face_tensor = faces[0]
-                face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().numpy()
+            try:
+                if not os.path.exists(image_path):
+                    st.sidebar.error(f"❌ File not found: {os.path.basename(image_path)}")
+                    continue
+                    
+                person_image = Image.open(image_path).convert('RGB')
+                faces = self.mtcnn(person_image)
                 
-                self.authorized_faces.append({
-                    'id': idx + 1,
-                    'image': person_image,
-                    'embedding': face_embedding,
-                    'name': f"Person_{idx + 1}"
-                })
-                
-                st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
-            else:
-                st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
+                if faces is not None and len(faces) > 0:
+                    face_tensor = faces[0]
+                    face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().numpy()
+                    
+                    self.authorized_faces.append({
+                        'id': idx + 1,
+                        'image': person_image,
+                        'embedding': face_embedding,
+                        'name': f"Person_{idx + 1}"
+                    })
+                    
+                    st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
+                else:
+                    st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
+            except Exception as e:
+                st.sidebar.error(f"❌ Error loading image {idx + 1}: {str(e)}")
         
         st.sidebar.info(f"Loaded {len(self.authorized_faces)} authorized persons")
     
@@ -233,13 +245,26 @@ def main():
     if st.sidebar.button("Remove Authorized Images"):
         st.session_state.detector.remove_images()
     
+    # Add error handling for displaying authorized person images
     if st.session_state.detector.authorized_image_paths:
         st.sidebar.subheader("Authorized Persons")
-        cols = st.sidebar.columns(min(3, len(st.session_state.detector.authorized_image_paths)))
-        for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
-            with cols[idx % 3]:
-                img = Image.open(img_path)
-                st.image(img, caption=f"Person {idx + 1}", width=100)
+        valid_paths = []
+        
+        for path in st.session_state.detector.authorized_image_paths:
+            if os.path.exists(path):
+                valid_paths.append(path)
+        
+        if valid_paths:
+            cols = st.sidebar.columns(min(3, len(valid_paths)))
+            for idx, img_path in enumerate(valid_paths):
+                try:
+                    with cols[idx % 3]:
+                        img = Image.open(img_path)
+                        st.image(img, caption=f"Person {idx + 1}", width=100)
+                except Exception as e:
+                    st.sidebar.error(f"Error displaying image: {os.path.basename(img_path)}")
+        else:
+            st.sidebar.warning("No valid image files found in authorized images list")
     
     with col1:
         st.header("Live Camera Feed")
