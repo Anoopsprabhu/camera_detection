@@ -189,7 +189,6 @@ class ImprovedPersonDetector:
         
         return frame, detected_persons
 
-
 class WebcamFaceDetectionProcessor(VideoProcessorBase):
     def __init__(self, detector, threshold=0.75):
         self.detector = detector
@@ -240,7 +239,6 @@ class WebcamFaceDetectionProcessor(VideoProcessorBase):
         
         return img
 
-
 def save_uploaded_file(uploaded_file):
     """Save uploaded file to the authorized_images directory and update JSON"""
     # Ensure the directory exists
@@ -266,7 +264,7 @@ def save_uploaded_file(uploaded_file):
     else:
         image_paths = []
     
-    #-REDACTED- Use OS-specific normalized path
+    # Use OS-specific normalized path
     file_path = os.path.normpath(file_path)
     image_paths.append(file_path)
     
@@ -274,7 +272,6 @@ def save_uploaded_file(uploaded_file):
         json.dump(image_paths, f)
     
     return file_path
-
 
 def process_webcam_snapshot(img_bytes):
     """Process webcam snapshot for face detection"""
@@ -314,17 +311,25 @@ def process_webcam_snapshot(img_bytes):
         st.error(f"Error processing webcam snapshot: {str(e)}")
         return None, False
 
-
 def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
     
     st.title("Authorized Person Detection System")
     
-    # Initialize session state
+    # Initialize session state at the very start
     if 'detector' not in st.session_state:
-        st.session_state.detector = ImprovedPersonDetector()
-        st.session_state.detection_log = []
+        try:
+            st.session_state.detector = ImprovedPersonDetector()
+            st.session_state.detection_log = []
+            st.success("✅ Detector initialized successfully")
+        except Exception as e:
+            st.error(f"❌ Failed to initialize detector: {str(e)}")
+            return  # Exit if detector initialization fails
     
+    # Ensure detection_log exists
+    if 'detection_log' not in st.session_state:
+        st.session_state.detection_log = []
+
     col1, col2 = st.columns([2, 1])
     
     st.sidebar.header("Configuration")
@@ -431,15 +436,13 @@ def main():
     # Display thumbnails of authorized persons if any exist
     if st.session_state.detector.authorized_image_paths:
         st.sidebar.subheader("Authorized Persons")
-        # Calculate how many columns we need
         num_images = len(st.session_state.detector.authorized_image_paths)
         cols_per_row = min(3, num_images)  # Max 3 columns per row
         
-        if cols_per_row > 0:  # Check if we have any images
+        if cols_per_row > 0:
             cols = st.sidebar.columns(cols_per_row)
             for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
                 norm_path = os.path.normpath(img_path)
-                # Only try to display if file exists
                 if os.path.exists(norm_path):
                     try:
                         with cols[idx % cols_per_row]:
@@ -452,24 +455,28 @@ def main():
         st.header("Live Camera Feed")
         threshold = st.slider("Detection Confidence Threshold", 0.6, 0.9, 0.75, 0.05)
         
-        # Create WebRTC component for browser webcam access
-        webrtc_ctx = webrtc_streamer(
-            key="face-detection",
-            video_processor_factory=lambda: WebcamFaceDetectionProcessor(
-                st.session_state.detector, threshold
-            ),
-            rtc_configuration=RTC_CONFIGURATION,
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
-        )
-        
-        if webrtc_ctx.video_processor:
-            if len(st.session_state.detector.authorized_faces) == 0:
-                st.warning("⚠️ No authorized persons loaded. Detection will not recognize anyone.")
-            st.success("✅ Webcam is active")
-        else:
-            st.error("❌ Webcam is not active")
-        
+        # Create WebRTC component for browser webcam access with error handling
+        try:
+            webrtc_ctx = webrtc_streamer(
+                key="face-detection",
+                video_processor_factory=lambda: WebcamFaceDetectionProcessor(
+                    st.session_state.detector, threshold
+                ),
+                rtc_configuration=RTC_CONFIGURATION,
+                media_stream_constraints={"video": True, "audio": False},
+                async_processing=True,
+            )
+            
+            if webrtc_ctx.video_processor:
+                if len(st.session_state.detector.authorized_faces) == 0:
+                    st.warning("⚠️ No authorized persons loaded. Detection will not recognize anyone.")
+                st.success("✅ Webcam is active")
+            else:
+                st.error("❌ Webcam is not active. Please check camera permissions.")
+        except Exception as e:
+            st.error(f"❌ Error initializing webcam: {str(e)}")
+            st.info("Please ensure your browser has camera access and try refreshing the page.")
+    
     with col2:
         st.header("Detection Log")
         log_placeholder = st.empty()
