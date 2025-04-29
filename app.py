@@ -258,7 +258,10 @@ def main():
                 run_detection(st.session_state.detector, threshold, webcam_placeholder, log_placeholder)
 
         status = "ACTIVE" if st.session_state.detection_active else "INACTIVE"
-        st.success(f"Detection is {status}") if st.session_state.detection_active else st.error(f"Detection is {status}")
+        if st.session_state.detection_active:
+            st.success(f"Detection is {status}")
+        else:
+            st.error(f"Detection is {status}")
 
     with col2:
         st.header("Detection Log")
