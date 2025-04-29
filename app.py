@@ -3,32 +3,30 @@ import cv2
 import numpy as np
 import os
 import json
-import time
 from datetime import datetime
 from PIL import Image
+import time
 from facenet_pytorch import MTCNN, InceptionResnetV1
 import torch
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
 import av
+import uuid
 
 # Configuration
 AUTHORIZED_DIR = "authorized_images"
 JSON_FILE = "authorized_images.json"
-
-# Improved RTC Configuration
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-class FaceDetector:
+class ImprovedFaceDetector:
     def __init__(self):
+        """Initialize the detector with authorized images"""
         self.authorized_faces = []
         self.authorized_image_paths = []
         
-        # Setup directory
         os.makedirs(AUTHORIZED_DIR, exist_ok=True)
         
-        # Load existing images
         if os.path.exists(JSON_FILE):
             try:
                 with open(JSON_FILE, 'r') as f:
@@ -37,14 +35,13 @@ class FaceDetector:
                 with open(JSON_FILE, 'w') as f:
                     json.dump([], f)
         
-        # Initialize models with error handling
         try:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.mtcnn = MTCNN(
                 keep_all=True,
                 device=self.device,
                 margin=20,
-                min_face_size=60
+                min_face_size=80
             )
             self.resnet = InceptionResnetV1(
                 pretrained='vggface2'
@@ -55,161 +52,208 @@ class FaceDetector:
             raise
 
     def load_images(self):
-        """Load and process authorized faces"""
+        """Load authorized images"""
         self.authorized_faces = []
         
-        for img_path in self.authorized_image_paths:
+        for idx, image_path in enumerate(self.authorized_image_paths):
             try:
-                img = Image.open(img_path).convert('RGB')
-                faces = self.mtcnn(img)
+                person_image = Image.open(image_path).convert('RGB')
+                faces = self.mtcnn(person_image)
                 
-                if faces is not None:
-                    embedding = self.resnet(faces[0].unsqueeze(0)).detach().cpu().numpy()
+                if faces is not None and len(faces) > 0:
+                    face_tensor = faces[0]
+                    face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().cpu().numpy()
+                    
                     self.authorized_faces.append({
-                        'path': img_path,
-                        'embedding': embedding,
-                        'name': os.path.basename(img_path).split('.')[0]
+                        'id': idx + 1,
+                        'image': person_image,
+                        'embedding': face_embedding,
+                        'name': f"Person_{idx + 1}"
                     })
+                    st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
+                else:
+                    st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
             except Exception as e:
-                st.warning(f"Failed to process {img_path}: {str(e)}")
+                st.sidebar.error(f"❌ Error processing {image_path}: {str(e)}")
         
-        st.sidebar.info(f"Loaded {len(self.authorized_faces)} authorized faces")
+        st.sidebar.info(f"Loaded {len(self.authorized_faces)} authorized persons")
 
-    def process_frame(self, frame, threshold=0.7):
-        """Process each video frame for face detection"""
-        detected = []
+    def remove_images(self):
+        """Remove all authorized images and delete all files listed in JSON"""
+        if os.path.exists(JSON_FILE):
+            try:
+                with open(JSON_FILE, 'r') as f:
+                    image_paths = json.load(f)
+                
+                for file_path in image_paths:
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            st.sidebar.success(f"🗑️ Deleted file: {os.path.basename(file_path)}")
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Failed to delete {os.path.basename(file_path)}: {str(e)}")
+                    else:
+                        st.sidebar.warning(f"File not found: {os.path.basename(file_path)}")
+                
+                with open(JSON_FILE, 'w') as f:
+                    json.dump([], f)
+            except Exception as e:
+                st.sidebar.error(f"❌ Error removing images: {str(e)}")
+        
+        self.authorized_faces = []
+        self.authorized_image_paths = []
+        st.sidebar.success("🗑️ All authorized images removed")
+
+    def match_face(self, face_embedding, threshold=0.75):
+        """Match a detected face with authorized faces using stricter criteria"""
+        if not self.authorized_faces:
+            return None, 0
+        
+        best_match = None
+        best_cosine_score = 0
+        best_euclidean_dist = float('inf')
+        
+        for auth_face in self.authorized_faces:
+            cosine_similarity = np.dot(face_embedding, auth_face['embedding'].T) / (
+                np.linalg.norm(face_embedding) * np.linalg.norm(auth_face['embedding'])
+            )
+            cosine_score = (cosine_similarity + 1) / 2
+            
+            euclidean_dist = np.linalg.norm(face_embedding - auth_face['embedding'])
+            
+            if cosine_score > best_cosine_score and euclidean_dist < 1.1:
+                best_cosine_score = cosine_score
+                best_euclidean_dist = euclidean_dist
+                best_match = auth_face
+        
+        if best_cosine_score >= threshold:
+            confidence = (best_cosine_score * 100).item() if isinstance(best_cosine_score, np.ndarray) else best_cosine_score * 100
+            return best_match, confidence
+        return None, 0
+
+    def process_frame(self, frame, threshold=0.75):
+        """Process frame to detect authorized persons"""
         try:
-            # Convert frame to RGB
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
+            pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            faces = self.mtcnn(pil_image)
+            detected_persons = []
             
-            # Detect faces
-            faces = self.mtcnn(pil_img)
-            boxes, _ = self.mtcnn.detect(pil_img)
+            if faces is not None:
+                boxes = self.mtcnn.detect(pil_image)[0]
+                if boxes is not None:
+                    for i, face_tensor in enumerate(faces):
+                        if i >= len(boxes):
+                            continue
+                        
+                        face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().cpu().numpy()
+                        match, confidence = self.match_face(face_embedding, threshold)
+                        
+                        if match:
+                            box = boxes[i]
+                            left, top, right, bottom = map(int, box)
+                            person_name = match['name']
+                            detected_persons.append({"name": person_name, "confidence": confidence})
+                            
+                            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                            info_text = f"{person_name} ({confidence:.1f}%)"
+                            cv2.rectangle(frame, (left, bottom - 25), (right, bottom), (0, 255, 0), cv2.FILLED)
+                            cv2.putText(frame, info_text, (left + 6, bottom - 6),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            if faces is not None and boxes is not None:
-                for i, (face, box) in enumerate(zip(faces, boxes)):
-                    # Get embedding for detected face
-                    embedding = self.resnet(face.unsqueeze(0).to(self.device)).detach().cpu().numpy()
-                    
-                    # Find best match
-                    best_match = None
-                    best_score = 0
-                    
-                    for auth_face in self.authorized_faces:
-                        # Calculate cosine similarity
-                        sim = np.dot(embedding, auth_face['embedding'].T)[0][0]
-                        sim = (sim + 1) / 2  # Convert to [0,1] range
-                        
-                        if sim > best_score and sim > threshold:
-                            best_score = sim
-                            best_match = auth_face
-                    
-                    # Draw results
-                    if best_match:
-                        x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        label = f"{best_match['name']} ({best_score*100:.1f}%)"
-                        cv2.putText(frame, label, (x1, y1-10), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                        
-                        detected.append({
-                            'name': best_match['name'],
-                            'confidence': best_score*100
-                        })
-                        
+            return frame, detected_persons
         except Exception as e:
             st.warning(f"Frame processing error: {str(e)}")
-        
-        return frame, detected
+            return frame, []
 
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        # Get detector from session state
         self.detector = st.session_state.detector
         self.threshold = st.session_state.detection_threshold
         self.last_log_time = 0
-    
+
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         processed_img, detections = self.detector.process_frame(img, self.threshold)
         
-        # Add status indicator
         status = "DETECTED" if detections else "Scanning..."
         color = (0, 255, 0) if detections else (255, 255, 255)
-        cv2.putText(processed_img, status, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(processed_img, status, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         
-        # Log detections (limit frequency)
-        current_time = time.time()
-        if detections and current_time - self.last_log_time > 3:  # Log every 3 seconds
-            self.last_log_time = current_time
-            if 'detection_log' in st.session_state:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                for d in detections:
-                    st.session_state.detection_log.insert(0, {
-                        'Timestamp': timestamp,
-                        'Person': d['name'],
-                        'Confidence': f"{d['confidence']:.1f}%"
-                    })
-                    # Keep log manageable
-                    if len(st.session_state.detection_log) > 50:
-                        st.session_state.detection_log.pop()
+        if detections and time.time() - self.last_log_time > 3:
+            self.last_log_time = time.time()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for person in detections:
+                st.session_state.detection_log.insert(0, {
+                    "Timestamp": timestamp,
+                    "Person": person["name"],
+                    "Confidence": f"{person['confidence']:.1f}%"
+                })
+                if len(st.session_state.detection_log) > 50:
+                    st.session_state.detection_log.pop()
         
         return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
 
+def save_uploaded_file(uploaded_file):
+    """Save uploaded file with unique timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{timestamp}_{uploaded_file.name}"
+    file_path = os.path.join(AUTHORIZED_DIR, filename)
+    
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    
+    return file_path
+
 def main():
-    st.set_page_config(page_title="Face Detection", layout="wide")
+    st.set_page_config(page_title="Authorized Person Detection", layout="wide")
     
-    # Initialize session state
     if 'detector' not in st.session_state:
-        st.session_state.detector = FaceDetector()
-        st.session_state.detector.load_images()
-    
-    if 'detection_log' not in st.session_state:
-        st.session_state.detection_log = []
-    
-    if 'webcam_active' not in st.session_state:
+        st.session_state.detector = ImprovedFaceDetector()
         st.session_state.webcam_active = False
-        
-    if 'detection_threshold' not in st.session_state:
+        st.session_state.detection_log = []
         st.session_state.detection_threshold = 0.75
     
-    st.title("Authorized Person Detection")
+    st.title("Authorized Person Detection System")
     
-    # Sidebar controls
-    st.sidebar.header("Configuration")
-    
-    # File uploader
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload reference images", 
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True
-    )
-    
-    if st.sidebar.button("Process Uploads") and uploaded_files:
-        for file in uploaded_files:
-            save_path = os.path.join(AUTHORIZED_DIR, file.name)
-            with open(save_path, "wb") as f:
-                f.write(file.getbuffer())
-            if save_path not in st.session_state.detector.authorized_image_paths:
-                st.session_state.detector.authorized_image_paths.append(save_path)
-        
-        # Save paths to JSON
-        with open(JSON_FILE, 'w') as f:
-            json.dump(st.session_state.detector.authorized_image_paths, f)
-        
-        # Reload faces
-        st.session_state.detector.load_images()
-        st.sidebar.success(f"Processed {len(uploaded_files)} images")
-    
-    # Main interface
     col1, col2 = st.columns([2, 1])
     
-    with col1:
-        st.header("Camera Feed")
+    # Sidebar configuration
+    with st.sidebar:
+        st.header("Configuration")
+        st.subheader("Upload Authorized Persons")
         
-        # Threshold control
+        uploaded_files = st.file_uploader(
+            "Upload images of authorized persons",
+            type=["jpg", "jpeg", "png"],
+            accept_multiple_files=True,
+            key="auth_uploads"
+        )
+        
+        if st.button("Load Authorized Images") and uploaded_files:
+            st.session_state.detector.authorized_image_paths = []
+            for uploaded_file in uploaded_files:
+                file_path = save_uploaded_file(uploaded_file)
+                st.session_state.detector.authorized_image_paths.append(file_path)
+            
+            with open(JSON_FILE, 'w') as f:
+                json.dump(st.session_state.detector.authorized_image_paths, f)
+            
+            st.session_state.detector.load_images()
+        
+        if st.button("Remove Authorized Images"):
+            st.session_state.detector.remove_images()
+        
+        if st.session_state.detector.authorized_image_paths:
+            st.subheader("Authorized Persons")
+            cols = st.columns(min(3, len(st.session_state.detector.authorized_image_paths)))
+            for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
+                with cols[idx % 3]:
+                    img = Image.open(img_path)
+                    st.image(img, caption=f"Person {idx + 1}", width=100)
+
+    with col1:
+        st.header("Live Camera Feed")
         st.session_state.detection_threshold = st.slider(
             "Recognition Threshold",
             min_value=0.5,
@@ -218,15 +262,12 @@ def main():
             step=0.05
         )
         
-        # Webcam control
-        if st.button("Start Camera" if not st.session_state.webcam_active else "Stop Camera"):
+        if st.button("Start/Stop Camera"):
             st.session_state.webcam_active = not st.session_state.webcam_active
-            st.experimental_rerun()
         
-        # WebRTC streamer
         if st.session_state.webcam_active:
             webrtc_ctx = webrtc_streamer(
-                key="face-detection",
+                key=f"face-detection-{uuid.uuid4()}",
                 video_processor_factory=VideoProcessor,
                 rtc_configuration=RTC_CONFIGURATION,
                 media_stream_constraints={
@@ -241,27 +282,23 @@ def main():
                 mode=WebRtcMode.SENDRECV
             )
             
-            if not webrtc_ctx or not webrtc_ctx.state.playing:
-                st.error("""
-                **Camera Access Issue**  
-                Please ensure:
-                - Camera permissions are enabled
-                - No other app is using the camera
-                - Try refreshing the page
-                - Recommended browser: Chrome
-                """)
+            status = "ACTIVE" if webrtc_ctx and webrtc_ctx.state.playing else "INACTIVE"
+            if status == "ACTIVE":
+                st.success(f"Detection is {status}")
+            else:
+                st.error(f"Detection is {status}\nPlease ensure camera permissions are enabled")
     
     with col2:
         st.header("Detection Log")
-        
-        if st.session_state.detection_log:
-            st.dataframe(st.session_state.detection_log, height=500)
-        else:
-            st.info("No detections yet")
-        
-        if st.button("Clear Log"):
-            st.session_state.detection_log = []
-            st.experimental_rerun()
+        with st.container():
+            if st.session_state.detection_log:
+                st.dataframe(st.session_state.detection_log, height=400)
+            else:
+                st.info("No authorized persons detected yet")
+            
+            if st.button("Clear Log"):
+                st.session_state.detection_log = []
+                st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
