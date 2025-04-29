@@ -8,7 +8,7 @@ from PIL import Image
 import time
 from facenet_pytorch import MTCNN, InceptionResnetV1
 import torch
-import threading
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 # Define the directory and JSON file
 AUTHORIZED_DIR = "authorized_images"
@@ -23,9 +23,25 @@ class ImprovedPersonDetector:
         if not os.path.exists(AUTHORIZED_DIR):
             os.makedirs(AUTHORIZED_DIR)
         
+        # Load JSON file safely
         if os.path.exists(JSON_FILE):
-            with open(JSON_FILE, 'r') as f:
-                self.authorized_image_paths = json.load(f)
+            try:
+                with open(JSON_FILE, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        self.authorized_image_paths = json.loads(content)
+                    else:
+                        st.sidebar.warning(f"{JSON_FILE} is empty. Initializing with empty list.")
+                        self.authorized_image_paths = []
+            except json.JSONDecodeError as e:
+                st.sidebar.error(f"Failed to parse {JSON_FILE}: {str(e)}. Initializing with empty list.")
+                self.authorized_image_paths = []
+            except Exception as e:
+                st.sidebar.error(f"Error reading {JSON_FILE}: {str(e)}. Initializing with empty list.")
+                self.authorized_image_paths = []
+        else:
+            st.sidebar.info(f"{JSON_FILE} does not exist. Initializing with empty list.")
+            self.authorized_image_paths = []
         
         self.mtcnn = MTCNN(keep_all=True, device='cpu', margin=20, min_face_size=80)
         self.resnet = InceptionResnetV1(pretrained='vggface2').eval()
@@ -35,44 +51,50 @@ class ImprovedPersonDetector:
         self.authorized_faces = []
         
         for idx, image_path in enumerate(self.authorized_image_paths):
-            person_image = Image.open(image_path).convert('RGB')
-            faces = self.mtcnn(person_image)
-            
-            if faces is not None and len(faces) > 0:
-                face_tensor = faces[0]
-                face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().numpy()
+            try:
+                person_image = Image.open(image_path).convert('RGB')
+                faces = self.mtcnn(person_image)
                 
-                self.authorized_faces.append({
-                    'id': idx + 1,
-                    'image': person_image,
-                    'embedding': face_embedding,
-                    'name': f"Person_{idx + 1}"
-                })
-                
-                st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
-            else:
-                st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
+                if faces is not None and len(faces) > 0:
+                    face_tensor = faces[0]
+                    face_embedding = self.resnet(face_tensor.unsqueeze(0)).detach().numpy()
+                    
+                    self.authorized_faces.append({
+                        'id': idx + 1,
+                        'image': person_image,
+                        'embedding': face_embedding,
+                        'name': f"Person_{idx + 1}"
+                    })
+                    
+                    st.sidebar.success(f"✅ Loaded authorized person: Person_{idx + 1}")
+                else:
+                    st.sidebar.error(f"❌ No face found in authorized image {idx + 1}")
+            except Exception as e:
+                st.sidebar.error(f"❌ Error processing image {image_path}: {str(e)}")
         
         st.sidebar.info(f"Loaded {len(self.authorized_faces)} authorized persons")
     
     def remove_images(self):
         """Remove all authorized images and delete all files listed in JSON"""
         if os.path.exists(JSON_FILE):
-            with open(JSON_FILE, 'r') as f:
-                image_paths = json.load(f)
-            
-            for file_path in image_paths:
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        st.sidebar.success(f"🗑️ Deleted file: {os.path.basename(file_path)}")
-                    except Exception as e:
-                        st.sidebar.error(f"❌ Failed to delete {os.path.basename(file_path)}: {str(e)}")
-                else:
-                    st.sidebar.warning(f"File not found: {os.path.basename(file_path)}")
-            
-            with open(JSON_FILE, 'w') as f:
-                json.dump([], f)
+            try:
+                with open(JSON_FILE, 'r') as f:
+                    image_paths = json.load(f)
+                
+                for file_path in image_paths:
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            st.sidebar.success(f"🗑️ Deleted file: {os.path.basename(file_path)}")
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Failed to delete {os.path.basename(file_path)}: {str(e)}")
+                    else:
+                        st.sidebar.warning(f"File not found: {os.path.basename(file_path)}")
+                
+                with open(JSON_FILE, 'w') as f:
+                    json.dump([], f)
+            except Exception as e:
+                st.sidebar.error(f"Error processing {JSON_FILE}: {str(e)}")
         
         self.authorized_faces = []
         self.authorized_image_paths = []
@@ -132,7 +154,7 @@ class ImprovedPersonDetector:
                         info_text = f"{person_name} ({confidence:.1f}%)"
                         cv2.rectangle(frame, (left, bottom - 25), (right, bottom), (0, 255, 0), cv2.FILLED)
                         cv2.putText(frame, info_text, (left + 6, bottom - 6),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return frame, detected_persons
 
@@ -145,72 +167,55 @@ def save_uploaded_file(uploaded_file):
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getvalue())
     
+    image_paths = []
     if os.path.exists(JSON_FILE):
-        with open(JSON_FILE, 'r') as f:
-            image_paths = json.load(f)
-    else:
-        image_paths = []
+        try:
+            with open(JSON_FILE, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    image_paths = json.loads(content)
+        except json.JSONDecodeError as e:
+            st.sidebar.error(f"Failed to parse {JSON_FILE}: {str(e)}. Starting with empty list.")
+        except Exception as e:
+            st.sidebar.error(f"Error reading {JSON_FILE}: {str(e)}. Starting with empty list.")
     
     image_paths.append(file_path)
-    with open(JSON_FILE, 'w') as f:
-        json.dump(image_paths, f)
+    try:
+        with open(JSON_FILE, 'w') as f:
+            json.dump(image_paths, f, indent=2)
+    except Exception as e:
+        st.sidebar.error(f"Error writing to {JSON_FILE}: {str(e)}")
     
     return file_path
 
-def run_detection_thread(detector, threshold, webcam_placeholder, log_placeholder):
-    """Run the detection loop in a separate thread"""
-    cap = cv2.VideoCapture(0)
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.detector = st.session_state.detector
+        self.threshold = 0.75
+        self.detection_active = False
     
-    # Try opening camera with different backends or indices if needed
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(1)  # Try a different camera index
-    
-    if not cap.isOpened():
-        webcam_placeholder.error("❌ Could not open webcam. Please check your camera connection and permissions.")
-        st.session_state.detection_active = False
-        return
-    
-    try:
-        while st.session_state.detection_active:
-            ret, frame = cap.read()
-            if not ret:
-                webcam_placeholder.warning("⚠️ Failed to get frame. Retrying...")
-                time.sleep(1)
-                continue
-            
-            frame, detected_persons = detector.process_frame(frame, threshold)
-            
-            status = "✅ DETECTED" if detected_persons else "Scanning..."
-            status_color = (0, 255, 0) if detected_persons else (255, 255, 255)
-            cv2.putText(frame, status, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
-            
-            if detected_persons:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                for person in detected_persons:
-                    st.session_state.detection_log.insert(0, {
-                        "Timestamp": current_time,
-                        "Person": person["name"],
-                        "Confidence": f"{person['confidence']:.1f}%"
-                    })
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            webcam_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
-            
-            if st.session_state.detection_log:
-                log_placeholder.dataframe(st.session_state.detection_log, height=400)
-            else:
-                log_placeholder.info("No authorized persons detected yet")
-            
-            time.sleep(0.03)  # Slightly faster refresh rate
-    
-    except Exception as e:
-        st.error(f"Error in detection thread: {str(e)}")
-    finally:
-        cap.release()
-        if st.session_state.detection_active:
-            st.session_state.detection_active = False
-            webcam_placeholder.warning("⚠️ Detection stopped due to an error")
+    def recv(self, frame):
+        if not st.session_state.detection_active:
+            return frame
+        
+        img = frame.to_ndarray(format="bgr")
+        img, detected_persons = self.detector.process_frame(img, self.threshold)
+        
+        status = "✅ DETECTED" if detected_persons else "Scanning..."
+        status_color = (0, 255, 0) if detected_persons else (255, 255, 255)
+        cv2.putText(img, status, (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+        
+        if detected_persons:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for person in detected_persons:
+                st.session_state.detection_log.insert(0, {
+                    "Timestamp": current_time,
+                    "Person": person["name"],
+                    "Confidence": f"{person['confidence']:.1f}%"
+                })
+        
+        return frame.from_ndarray(img, format="bgr")
 
 def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
@@ -218,18 +223,10 @@ def main():
     st.title("Authorized Person Detection System")
     st.subheader("Authorized Person")
     
-    # Initialize session state
     if 'detector' not in st.session_state:
         st.session_state.detector = ImprovedPersonDetector()
-    
-    if 'detection_active' not in st.session_state:
         st.session_state.detection_active = False
-    
-    if 'detection_log' not in st.session_state:
         st.session_state.detection_log = []
-        
-    if 'detection_thread' not in st.session_state:
-        st.session_state.detection_thread = None
     
     col1, col2 = st.columns([2, 1])
     webcam_placeholder = col1.empty()
@@ -246,10 +243,13 @@ def main():
     
     if st.sidebar.button("Load Authorized Images"):
         st.session_state.detector.authorized_image_paths = []
-        for uploaded_file in authorized_uploads:
-            file_path = save_uploaded_file(uploaded_file)
-            st.session_state.detector.authorized_image_paths.append(file_path)
-        st.session_state.detector.load_images()
+        if authorized_uploads:
+            for uploaded_file in authorized_uploads:
+                file_path = save_uploaded_file(uploaded_file)
+                st.session_state.detector.authorized_image_paths.append(file_path)
+            st.session_state.detector.load_images()
+        else:
+            st.sidebar.warning("No images uploaded to load.")
     
     if st.sidebar.button("Remove Authorized Images"):
         st.session_state.detector.remove_images()
@@ -258,45 +258,43 @@ def main():
         st.sidebar.subheader("Authorized Persons")
         cols = st.sidebar.columns(min(3, len(st.session_state.detector.authorized_image_paths)))
         for idx, img_path in enumerate(st.session_state.detector.authorized_image_paths):
-            if os.path.exists(img_path):
-                with cols[idx % 3]:
+            with cols[idx % 3]:
+                try:
                     img = Image.open(img_path)
                     st.image(img, caption=f"Person {idx + 1}", width=100)
+                except Exception as e:
+                    st.sidebar.error(f"Error displaying image {img_path}: {str(e)}")
     
     with col1:
         st.header("Live Camera Feed")
-        threshold = 0.75
         
-        # Show webcam status before starting detection
-        if not st.session_state.detection_active:
-            webcam_placeholder.info("Click 'Start Detection' to activate the webcam")
+        # WebRTC configuration for webcam streaming
+        RTC_CONFIGURATION = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
         
-        # Toggle detection button with clear labels
-        if st.session_state.detection_active:
-            if st.button("Stop Detection"):
-                st.session_state.detection_active = False
-                if st.session_state.detection_thread and st.session_state.detection_thread.is_alive():
-                    st.session_state.detection_thread.join(timeout=1.0)
-                st.experimental_rerun()
-        else:
-            if st.button("Start Detection"):
-                st.session_state.detection_active = True
-                # Start detection in a separate thread
-                st.session_state.detection_thread = threading.Thread(
-                    target=run_detection_thread,
-                    args=(st.session_state.detector, threshold, webcam_placeholder, log_placeholder)
-                )
-                st.session_state.detection_thread.daemon = True
-                st.session_state.detection_thread.start()
-                st.experimental_rerun()
+        webrtc_ctx = webrtc_streamer(
+            key="webcam",
+            mode="sendrecv",
+            rtc_configuration=RTC_CONFIGURATION,
+            video_processor_factory=VideoProcessor,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
         
-        # Show detection status
+        if st.button("Start/Stop Detection"):
+            st.session_state.detection_active = not st.session_state.detection_active
+            if webrtc_ctx.video_processor:
+                webrtc_ctx.video_processor.detection_active = st.session_state.detection_active
+            if not st.session_state.detection_active:
+                st.session_state.detection_log = []
+        
         status = "ACTIVE" if st.session_state.detection_active else "INACTIVE"
         if st.session_state.detection_active:
             st.success(f"Detection is {status}")
         else:
             st.error(f"Detection is {status}")
-        
+    
     with col2:
         st.header("Detection Log")
         with st.container():
@@ -304,6 +302,6 @@ def main():
                 log_placeholder.dataframe(st.session_state.detection_log, height=400)
             else:
                 log_placeholder.info("No authorized persons detected yet")
-    
+
 if __name__ == "__main__":
     main()
