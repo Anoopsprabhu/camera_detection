@@ -156,6 +156,7 @@ def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
     st.title("Authorized Person Detection System")
 
+    # Ensure 'detector' is always available before anything else
     if 'detector' not in st.session_state:
         st.session_state.detector = ImprovedPersonDetector()
         st.session_state.detection_log = []
@@ -195,11 +196,14 @@ def main():
 
     with col1:
         st.header("Live Camera Feed")
-        st.info("Turn on webcam and allow browser access")
-        webrtc_streamer(
-            key="person-detect",
-            video_transformer_factory=lambda: VideoProcessor(st.session_state.detector)
-        )
+
+        if st.session_state.detector.authorized_faces:
+            webrtc_streamer(
+                key="person-detect",
+                video_transformer_factory=lambda: VideoProcessor(st.session_state.detector)
+            )
+        else:
+            st.info("ℹ️ Load at least one authorized face to start detection.")
 
     with col2:
         st.header("Detection Log")
@@ -208,5 +212,3 @@ def main():
         else:
             st.info("No authorized persons detected yet")
 
-if __name__ == "__main__":
-    main()
