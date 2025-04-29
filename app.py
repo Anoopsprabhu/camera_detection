@@ -10,7 +10,7 @@ from PIL import Image, ImageOps
 import io
 from facenet_pytorch import MTCNN, InceptionResnetV1
 import torch
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
 
 # Define the directory and JSON file
 AUTHORIZED_DIR = "authorized_images"
@@ -320,15 +320,18 @@ def main():
     if 'detector' not in st.session_state:
         try:
             st.session_state.detector = ImprovedPersonDetector()
-            st.session_state.detection_log = []
             st.success("✅ Detector initialized successfully")
         except Exception as e:
             st.error(f"❌ Failed to initialize detector: {str(e)}")
             return  # Exit if detector initialization fails
     
-    # Ensure detection_log exists
+    # Initialize detection log if it doesn't exist
     if 'detection_log' not in st.session_state:
         st.session_state.detection_log = []
+    
+    # Initialize webcam state
+    if 'webcam_active' not in st.session_state:
+        st.session_state.webcam_active = False
 
     col1, col2 = st.columns([2, 1])
     
@@ -455,27 +458,36 @@ def main():
         st.header("Live Camera Feed")
         threshold = st.slider("Detection Confidence Threshold", 0.6, 0.9, 0.75, 0.05)
         
-        # Create WebRTC component for browser webcam access with error handling
-        try:
-            webrtc_ctx = webrtc_streamer(
-                key="face-detection",
-                video_processor_factory=lambda: WebcamFaceDetectionProcessor(
-                    st.session_state.detector, threshold
-                ),
-                rtc_configuration=RTC_CONFIGURATION,
-                media_stream_constraints={"video": True, "audio": False},
-                async_processing=True,
-            )
-            
-            if webrtc_ctx.video_processor:
-                if len(st.session_state.detector.authorized_faces) == 0:
-                    st.warning("⚠️ No authorized persons loaded. Detection will not recognize anyone.")
-                st.success("✅ Webcam is active")
-            else:
-                st.error("❌ Webcam is not active. Please check camera permissions.")
-        except Exception as e:
-            st.error(f"❌ Error initializing webcam: {str(e)}")
-            st.info("Please ensure your browser has camera access and try refreshing the page.")
+        # Add toggle button for webcam
+        if st.button("Start Detection" if not st.session_state.webcam_active else "Stop Detection"):
+            st.session_state.webcam_active = not st.session_state.webcam_active
+            st.experimental_rerun()
+        
+        # Create WebRTC component only when webcam is active
+        if st.session_state.webcam_active:
+            try:
+                webrtc_ctx = webrtc_streamer(
+                    key="face-detection",
+                    video_processor_factory=lambda: WebcamFaceDetectionProcessor(
+                        st.session_state.detector, threshold
+                    ),
+                    rtc_configuration=RTC_CONFIGURATION,
+                    media_stream_constraints={"video": True, "audio": False},
+                    async_processing=True,
+                    mode=WebRtcMode.SENDRECV,
+                )
+                
+                if webrtc_ctx.video_processor:
+                    if len(st.session_state.detector.authorized_faces) == 0:
+                        st.warning("⚠️ No authorized persons loaded. Detection will not recognize anyone.")
+                    st.success("✅ Webcam is active")
+                else:
+                    st.error("❌ Webcam is not active. Please check camera permissions.")
+            except Exception as e:
+                st.error(f"❌ Error initializing webcam: {str(e)}")
+                st.info("Please ensure your browser has camera access and try refreshing the page.")
+        else:
+            st.info("Webcam is currently off. Click 'Start Detection' to begin.")
     
     with col2:
         st.header("Detection Log")
