@@ -8,7 +8,7 @@ from PIL import Image
 import time
 from facenet_pytorch import MTCNN, InceptionResnetV1
 import torch
-
+import threading
 # Define the directory and JSON file
 AUTHORIZED_DIR = "authorized_images"
 JSON_FILE = "authorized_images.json"
@@ -168,36 +168,45 @@ def run_detection(detector, threshold, webcam_placeholder, log_placeholder):
         while st.session_state.detection_active:
             ret, frame = cap.read()
             if not ret:
+                st.warning("Could not read frame from camera")
                 break
             
-            frame, detected_persons = detector.process_frame(frame, threshold)
-            
-            status = "✅ DETECTED" if detected_persons else "Scanning..."
-            status_color = (0, 255, 0) if detected_persons else (255, 255, 255)
-            cv2.putText(frame, status, (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
-            
-            if detected_persons:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                for person in detected_persons:
-                    st.session_state.detection_log.insert(0, {
-                        "Timestamp": current_time,
-                        "Person": person["name"],
-                        "Confidence": f"{person['confidence']:.1f}%"
-                    })
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            webcam_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
-            
-            if st.session_state.detection_log:
-                log_placeholder.dataframe(st.session_state.detection_log, height=400)
-            else:
-                log_placeholder.info("No authorized persons detected yet")
-            
-            time.sleep(0.05)
-    
+            try:
+                frame, detected_persons = detector.process_frame(frame, threshold)
+                
+                # Display status
+                status = "✅ DETECTED" if detected_persons else "Scanning..."
+                color = (0, 255, 0) if detected_persons else (255, 255, 255)
+                cv2.putText(frame, status, (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                
+                # Display frame
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                webcam_placeholder.image(rgb_frame, channels="RGB")
+                
+                # Update detection log
+                if detected_persons:
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for person in detected_persons:
+                        st.session_state.detection_log.insert(0, {
+                            "Timestamp": current_time,
+                            "Person": person["name"],
+                            "Confidence": f"{person['confidence']:.1f}%"
+                        })
+                
+                # Update log display
+                if st.session_state.detection_log:
+                    log_placeholder.dataframe(st.session_state.detection_log, height=400)
+                else:
+                    log_placeholder.info("No authorized persons detected yet")
+                
+            except Exception as e:
+                st.error(f"Error processing frame: {str(e)}")
+                continue
+                
     finally:
         cap.release()
+        cv2.destroyAllWindows()
 
 def main():
     st.set_page_config(page_title="Authorized Person Detection", layout="wide")
@@ -241,7 +250,7 @@ def main():
                 img = Image.open(img_path)
                 st.image(img, caption=f"Person {idx + 1}", width=100)
     
-    with col1:
+     with col1:
         st.header("Live Camera Feed")
         threshold = 0.75
         
@@ -249,7 +258,13 @@ def main():
             st.session_state.detection_active = not st.session_state.detection_active
             if st.session_state.detection_active:
                 st.session_state.detection_log = []
-                run_detection(st.session_state.detector, threshold, webcam_placeholder, log_placeholder)
+                # Run detection in a thread to prevent blocking
+                
+                thread = threading.Thread(
+                    target=run_detection,
+                    args=(st.session_state.detector, threshold, webcam_placeholder, log_placeholder)
+                )
+                thread.start()
         
         status = "ACTIVE" if st.session_state.detection_active else "INACTIVE"
         if st.session_state.detection_active:
